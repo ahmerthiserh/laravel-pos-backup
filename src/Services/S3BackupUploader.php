@@ -180,6 +180,7 @@ class S3BackupUploader
             'Key' => $s3Key,
             'Body' => $fileStream,
             'ContentType' => 'application/gzip',
+            'ChecksumAlgorithm' => 'SHA256',
             'Metadata' => [
                 'pos-id' => $this->sanitizeIdentifier($posId),
                 'sha256' => $sha256,
@@ -187,7 +188,7 @@ class S3BackupUploader
             ],
         ];
 
-        // Private bucket & Server-Side Encryption (SSE-S3 or SSE-KMS)
+        // Server-Side Encryption (default SSE-S3 AES256 or SSE-KMS)
         if ($kmsKeyId !== null && $kmsKeyId !== '') {
             $uploadOptions['ServerSideEncryption'] = 'aws:kms';
             $uploadOptions['SSEKMSKeyId'] = $kmsKeyId;
@@ -197,14 +198,16 @@ class S3BackupUploader
 
         try {
             // ObjectUploader automatically handles standard PutObject for smaller files
-            // and multipart upload for larger files (default threshold: 16MB)
-            $uploader = new ObjectUploader($client, $bucket, $s3Key, $fileStream, 'private', [
+            // and multipart upload for larger files (default threshold: 16MB).
+            // ACL is omitted (null) so modern S3 buckets with Object Ownership "Bucket owner enforced"
+            // (ACLs disabled) do not reject uploads with AccessControlListNotSupported.
+            $uploader = new ObjectUploader($client, $bucket, $s3Key, $fileStream, null, [
                 'params' => $uploadOptions,
             ]);
 
             $result = $uploader->upload();
 
-            // Verify uploaded object exists and size matches
+            // Verify uploaded object exists, size matches, and SHA-256 integrity is valid
             $this->verifyRemoteObject($client, $bucket, $s3Key, $fileSize, $sha256);
 
             return [
@@ -226,19 +229,20 @@ class S3BackupUploader
     }
 
     /**
-     * Verify that the uploaded object exists in S3 and its size matches the local backup.
+     * Verify that the uploaded object exists in S3 and its size and checksum match the local backup.
      */
     public function verifyRemoteObject(
         S3Client $client,
         string $bucket,
         string $key,
         int $expectedSize,
-        string $expectedSha256
+        string $expectedSha256Hex
     ): void {
         try {
             $head = $client->headObject([
                 'Bucket' => $bucket,
                 'Key' => $key,
+                'ChecksumMode' => 'ENABLED',
             ]);
 
             $contentLength = (int) ($head['ContentLength'] ?? -1);
@@ -246,9 +250,26 @@ class S3BackupUploader
                 throw new RuntimeException("Remote object size mismatch: S3 reported {$contentLength} bytes, expected {$expectedSize} bytes.");
             }
 
-            $remoteSha256 = $head['Metadata']['sha256'] ?? null;
-            if ($remoteSha256 !== null && $remoteSha256 !== $expectedSha256) {
-                throw new RuntimeException("Remote object SHA-256 metadata mismatch.");
+            // Verify native AWS S3 SHA-256 checksum if provided by S3
+            // AWS S3 ChecksumSHA256 returns base64-encoded raw 32-byte digest
+            $remoteChecksumB64 = $head['ChecksumSHA256'] ?? null;
+            if ($remoteChecksumB64 !== null && $remoteChecksumB64 !== '') {
+                $expectedSha256B64 = base64_encode(hex2bin($expectedSha256Hex) ?: '');
+                // For single-part uploads, ChecksumSHA256 matches the base64 SHA256 of the entire object
+                // For multipart uploads, S3 appends part count suffix (e.g., hash-1), so we check when suffix is absent
+                if (!str_contains($remoteChecksumB64, '-') && $remoteChecksumB64 !== $expectedSha256B64) {
+                    throw new RuntimeException("Remote object SHA-256 checksum mismatch: S3 reported {$remoteChecksumB64}, expected {$expectedSha256B64}.");
+                }
+            }
+
+            // Verify user-defined metadata sha256
+            $remoteSha256Meta = $head['Metadata']['sha256'] ?? null;
+            if ($remoteSha256Meta === null) {
+                throw new RuntimeException("Remote object missing expected sha256 metadata.");
+            }
+
+            if (strtolower((string) $remoteSha256Meta) !== strtolower($expectedSha256Hex)) {
+                throw new RuntimeException("Remote object SHA-256 metadata mismatch: S3 reported {$remoteSha256Meta}, expected {$expectedSha256Hex}.");
             }
         } catch (AwsException $e) {
             throw new RuntimeException("Verification of uploaded object [{$key}] failed: " . ($e->getAwsErrorMessage() ?: $e->getMessage()), 0, $e);

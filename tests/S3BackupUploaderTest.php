@@ -198,16 +198,55 @@ class S3BackupUploaderTest extends TestCase
         }
     }
 
-    public function test_upload_fails_when_remote_verification_size_mismatches(): void
+    public function test_upload_omits_acl_and_sends_checksum_algorithm(): void
     {
-        $file = sys_get_temp_dir() . '/upload_mismatch_' . uniqid() . '.sql.gz';
+        $file = sys_get_temp_dir() . '/upload_no_acl_' . uniqid() . '.sql.gz';
         file_put_contents($file, str_repeat('DATA ', 50));
+        $fileSize = filesize($file);
+        $expectedSha256 = hash_file('sha256', $file);
+
+        $mock = new MockHandler();
+        $mock->append(function (CommandInterface $cmd) {
+            $this->assertNull($cmd['ACL'], 'ACL must be omitted to support Object Ownership: Bucket owner enforced');
+            $this->assertEquals('SHA256', $cmd['ChecksumAlgorithm']);
+            return new Result(['ETag' => '"dummy-etag"']);
+        });
+        $mock->append(new Result([
+            'ContentLength' => $fileSize,
+            'ChecksumSHA256' => base64_encode(hex2bin($expectedSha256) ?: ''),
+            'Metadata' => ['sha256' => $expectedSha256],
+        ]));
+
+        $s3Client = new S3Client([
+            'version' => 'latest',
+            'region' => 'us-east-1',
+            'handler' => $mock,
+            'credentials' => ['key' => 'K', 'secret' => 'S'],
+        ]);
+
+        $uploader = new S3BackupUploader($s3Client);
+
+        try {
+            $result = $uploader->upload($file, 'pos-no-acl', ['bucket' => 'no-acl-bucket']);
+            $this->assertEquals('no-acl-bucket', $result['bucket']);
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    public function test_upload_fails_when_native_s3_checksum_sha256_mismatches(): void
+    {
+        $file = sys_get_temp_dir() . '/upload_chk_mismatch_' . uniqid() . '.sql.gz';
+        file_put_contents($file, str_repeat('DATA ', 50));
+        $fileSize = filesize($file);
+        $expectedSha256 = hash_file('sha256', $file);
 
         $mock = new MockHandler();
         $mock->append(new Result(['ETag' => '"etag"']));
         $mock->append(new Result([
-            'ContentLength' => 999999, // Mismatched size
-            'Metadata' => [],
+            'ContentLength' => $fileSize,
+            'ChecksumSHA256' => base64_encode(str_repeat('A', 32)), // Corrupted remote checksum
+            'Metadata' => ['sha256' => $expectedSha256],
         ]));
 
         $s3Client = new S3Client([
@@ -221,9 +260,73 @@ class S3BackupUploaderTest extends TestCase
 
         try {
             $this->expectException(RuntimeException::class);
-            $this->expectExceptionMessage('Remote object size mismatch');
+            $this->expectExceptionMessage('Remote object SHA-256 checksum mismatch');
 
-            $uploader->upload($file, 'pos-size-mismatch', ['bucket' => 'test-bucket']);
+            $uploader->upload($file, 'pos-chk-mismatch', ['bucket' => 'test-bucket']);
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    public function test_upload_fails_when_metadata_sha256_missing(): void
+    {
+        $file = sys_get_temp_dir() . '/upload_meta_missing_' . uniqid() . '.sql.gz';
+        file_put_contents($file, str_repeat('DATA ', 50));
+        $fileSize = filesize($file);
+
+        $mock = new MockHandler();
+        $mock->append(new Result(['ETag' => '"etag"']));
+        $mock->append(new Result([
+            'ContentLength' => $fileSize,
+            'Metadata' => [], // Missing sha256
+        ]));
+
+        $s3Client = new S3Client([
+            'version' => 'latest',
+            'region' => 'us-east-1',
+            'handler' => $mock,
+            'credentials' => ['key' => 'K', 'secret' => 'S'],
+        ]);
+
+        $uploader = new S3BackupUploader($s3Client);
+
+        try {
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('missing expected sha256 metadata');
+
+            $uploader->upload($file, 'pos-meta-missing', ['bucket' => 'test-bucket']);
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    public function test_upload_fails_when_metadata_sha256_mismatches(): void
+    {
+        $file = sys_get_temp_dir() . '/upload_meta_mismatch_' . uniqid() . '.sql.gz';
+        file_put_contents($file, str_repeat('DATA ', 50));
+        $fileSize = filesize($file);
+
+        $mock = new MockHandler();
+        $mock->append(new Result(['ETag' => '"etag"']));
+        $mock->append(new Result([
+            'ContentLength' => $fileSize,
+            'Metadata' => ['sha256' => 'tampered_hash_value'],
+        ]));
+
+        $s3Client = new S3Client([
+            'version' => 'latest',
+            'region' => 'us-east-1',
+            'handler' => $mock,
+            'credentials' => ['key' => 'K', 'secret' => 'S'],
+        ]);
+
+        $uploader = new S3BackupUploader($s3Client);
+
+        try {
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('Remote object SHA-256 metadata mismatch');
+
+            $uploader->upload($file, 'pos-meta-mismatch', ['bucket' => 'test-bucket']);
         } finally {
             @unlink($file);
         }

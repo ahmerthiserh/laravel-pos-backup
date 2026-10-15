@@ -280,41 +280,57 @@ class MySqlDumpService
 
         $dumpStderr = '';
         $gzipStderr = '';
+        $startTime = time();
+        $timeoutSeconds = 600; // 10 minute maximum dump execution threshold
 
-        while (true) {
-            $r = [$dumpPipes[2], $gzipPipes[2]];
-            $w = null;
-            $e = null;
-            $n = @stream_select($r, $w, $e, 0, 200000);
+        try {
+            while (true) {
+                $r = [$dumpPipes[2], $gzipPipes[2]];
+                $w = null;
+                $e = null;
+                $n = @stream_select($r, $w, $e, 0, 200000);
 
-            if ($n !== false && $n > 0) {
-                foreach ($r as $stream) {
-                    $buf = fread($stream, 8192);
-                    if ($stream === $dumpPipes[2]) {
-                        $dumpStderr .= $buf;
-                    } elseif ($stream === $gzipPipes[2]) {
-                        $gzipStderr .= $buf;
+                if ($n !== false && $n > 0) {
+                    foreach ($r as $stream) {
+                        $buf = fread($stream, 8192);
+                        if ($stream === $dumpPipes[2]) {
+                            $dumpStderr .= $buf;
+                        } elseif ($stream === $gzipPipes[2]) {
+                            $gzipStderr .= $buf;
+                        }
                     }
                 }
+
+                $dumpStatus = @proc_get_status($dumpProc);
+                $gzipStatus = @proc_get_status($gzipProc);
+
+                $dumpRunning = $dumpStatus['running'] ?? false;
+                $gzipRunning = $gzipStatus['running'] ?? false;
+
+                if (!$dumpRunning && !$gzipRunning) {
+                    // Drain any final data
+                    $dumpStderr .= stream_get_contents($dumpPipes[2]);
+                    $gzipStderr .= stream_get_contents($gzipPipes[2]);
+                    break;
+                }
+
+                if ((time() - $startTime) > $timeoutSeconds) {
+                    $this->terminateProcess($dumpProc);
+                    $this->terminateProcess($gzipProc);
+                    throw new RuntimeException("Database dump process timed out after {$timeoutSeconds} seconds.");
+                }
             }
-
-            $dumpStatus = @proc_get_status($dumpProc);
-            $gzipStatus = @proc_get_status($gzipProc);
-
-            $dumpRunning = $dumpStatus['running'] ?? false;
-            $gzipRunning = $gzipStatus['running'] ?? false;
-
-            if (!$dumpRunning && !$gzipRunning) {
-                // Drain any final data
-                $dumpStderr .= stream_get_contents($dumpPipes[2]);
-                $gzipStderr .= stream_get_contents($gzipPipes[2]);
-                break;
+        } finally {
+            if (is_resource($dumpPipes[2])) {
+                @fclose($dumpPipes[2]);
+            }
+            if (is_resource($gzipPipes[2])) {
+                @fclose($gzipPipes[2]);
+            }
+            if (is_resource($outHandle)) {
+                @fclose($outHandle);
             }
         }
-
-        fclose($dumpPipes[2]);
-        fclose($gzipPipes[2]);
-        fclose($outHandle);
 
         $dumpExit = proc_close($dumpProc);
         $gzipExit = proc_close($gzipProc);
@@ -327,6 +343,21 @@ class MySqlDumpService
         if ($gzipExit !== 0) {
             $cleanGzError = trim((string) $gzipStderr);
             throw new RuntimeException("gzip compression failed with exit code {$gzipExit}: " . ($cleanGzError ?: 'Unknown error.'));
+        }
+    }
+
+    /**
+     * Terminate process safely if running.
+     *
+     * @param resource $process
+     */
+    protected function terminateProcess($process): void
+    {
+        if (is_resource($process)) {
+            $status = @proc_get_status($process);
+            if (!empty($status['running'])) {
+                @proc_terminate($process, 9);
+            }
         }
     }
 

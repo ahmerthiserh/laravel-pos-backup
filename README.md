@@ -90,7 +90,7 @@ Backups are uploaded to an isolated, multi-tenant path hierarchy:
 
 ## Required AWS IAM Permissions
 
-To allow POS applications to upload and verify backups, the IAM user or role requires minimum least-privilege permissions on the target bucket and prefix:
+To allow POS applications to upload and verify backups, the IAM user or role requires minimum least-privilege permissions on the target bucket and object prefix:
 
 ```json
 {
@@ -102,23 +102,24 @@ To allow POS applications to upload and verify backups, the IAM user or role req
             "Action": [
                 "s3:PutObject",
                 "s3:GetObject",
-                "s3:HeadObject"
+                "s3:AbortMultipartUpload"
             ],
             "Resource": "arn:aws:s3:::your-backup-bucket-name/pos-backups/*"
-        },
-        {
-            "Sid": "AllowBucketLocationCheck",
-            "Effect": "Allow",
-            "Action": [
-                "s3:GetBucketLocation"
-            ],
-            "Resource": "arn:aws:s3:::your-backup-bucket-name"
         }
     ]
 }
 ```
 
-> If using AWS KMS for server-side encryption (`kms_key_id`), the role also requires `kms:GenerateDataKey` and `kms:Decrypt` permissions on the KMS key.
+> **IAM Action Notes**:
+> - `s3:HeadObject` is an API operation, but in AWS IAM policies it is authorized under the `s3:GetObject` permission.
+> - `s3:AbortMultipartUpload` allows the AWS SDK's `ObjectUploader` to clean up incomplete multipart upload parts if a network failure or error interrupts large uploads.
+> - If using AWS KMS for customer-managed server-side encryption (`TIGERPOS_BACKUP_AWS_KMS_KEY_ID`), the IAM entity also requires `kms:GenerateDataKey` and `kms:Decrypt` on the specific KMS key ARN.
+
+## Upload Integrity & Verification Model
+
+The uploader implements a two-tier integrity verification model:
+1. **End-to-End Object Verification**: The local file's SHA-256 is computed before upload and stored in user metadata (`x-amz-meta-sha256`). After upload, a `HeadObject` request retrieves and asserts the remote size (`ContentLength`) and metadata SHA-256 match the local backup.
+2. **Native S3 Checksum Validation**: In addition to user metadata, requests enable AWS S3's native `ChecksumAlgorithm=SHA256` (`ChecksumMode=ENABLED`), allowing S3 to compute and store a cryptographically validated server-side checksum. For single-part uploads, this checksum directly validates object bytes on S3; for multipart uploads, AWS S3 calculates a composite checksum per part.
 
 ## Installation
 
