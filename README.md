@@ -259,7 +259,20 @@ The package guarantees cryptographic and structural backup integrity before repo
 
 ## Installation
 
-Add this package to your Laravel application's `composer.json` or private repository registry:
+### Private Git Repository (Composer VCS)
+
+To install the package into a host POS application from the private Git repository, add the repository configuration to your application's `composer.json`:
+
+```json
+"repositories": [
+    {
+        "type": "vcs",
+        "url": "git@github.com:ahmerthiserh/laravel-pos-backup.git"
+    }
+]
+```
+
+Then install the package via Composer:
 
 ```bash
 composer require tiger/laravel-pos-backup
@@ -274,6 +287,38 @@ php artisan vendor:publish --tag=tigerpos-backup-config
 ```
 
 This creates `config/tigerpos-backup.php` where you can customize backup parameters or provide environment variables:
+
+## Recommended Deployment Smoke-Test Procedure
+
+Before deploying or enabling automated backups on production POS endpoints, execute this isolated smoke-test procedure on a staging or test terminal:
+
+1. **Configure Isolated Staging Scope**:
+   Configure dedicated test values in `.env` to prevent any possibility of touching production data:
+   ```env
+   TIGERPOS_BACKUP_POS_ID="smoke-test-pos"
+   TIGERPOS_BACKUP_S3_PREFIX="pos-backups-staging"
+   ```
+2. **Test Local Backup Isolation**:
+   Execute a local-only backup targeting a disposable test database:
+   ```bash
+   php artisan tigerpos:backup --connection=mysql_test --local-only
+   ```
+   Verify that the archive is created in `temp_dir`, passes internal integrity checks, and exits with code `0`.
+3. **Test S3 Upload & Cryptographic Integrity**:
+   Perform a full backup to the staging S3 prefix:
+   ```bash
+   php artisan tigerpos:backup --connection=mysql_test
+   ```
+   Verify that the upload succeeds, server-side encryption is confirmed, and SHA-256 integrity verification completes.
+4. **Test Safe Dry-Run Pruning**:
+   Execute the pruning command in default simulation mode:
+   ```bash
+   php artisan tigerpos:prune-backups
+   ```
+   Confirm that candidate detection works as expected and **no** files or S3 objects are deleted.
+5. **Verify Multi-Tenant Isolation**:
+   Confirm in AWS S3 console that all test objects are confined to `{prefix}/smoke-test-pos/database/` and that production prefixes remain untouched.
+
 
 | Environment Variable | Description | Default |
 |---|---|---|
