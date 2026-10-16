@@ -230,6 +230,13 @@ class S3BackupUploader
 
     /**
      * Verify that the uploaded object exists in S3 and its size and checksum match the local backup.
+     *
+     * Verification strategy:
+     * 1. Check HeadObject ContentLength matches local file size.
+     * 2. If S3 returns a single-part native ChecksumSHA256 (does not contain '-'), assert it matches the local SHA-256.
+     * 3. If S3 uploaded via multipart (ChecksumSHA256 has a part count suffix like '-1' or is missing a full-object checksum),
+     *    stream the object from S3 using GetObject, compute its SHA-256 on the fly, and assert it matches the local digest.
+     * 4. Verify user metadata sha256 as an additional layer of provenance.
      */
     public function verifyRemoteObject(
         S3Client $client,
@@ -250,19 +257,7 @@ class S3BackupUploader
                 throw new RuntimeException("Remote object size mismatch: S3 reported {$contentLength} bytes, expected {$expectedSize} bytes.");
             }
 
-            // Verify native AWS S3 SHA-256 checksum if provided by S3
-            // AWS S3 ChecksumSHA256 returns base64-encoded raw 32-byte digest
-            $remoteChecksumB64 = $head['ChecksumSHA256'] ?? null;
-            if ($remoteChecksumB64 !== null && $remoteChecksumB64 !== '') {
-                $expectedSha256B64 = base64_encode(hex2bin($expectedSha256Hex) ?: '');
-                // For single-part uploads, ChecksumSHA256 matches the base64 SHA256 of the entire object
-                // For multipart uploads, S3 appends part count suffix (e.g., hash-1), so we check when suffix is absent
-                if (!str_contains($remoteChecksumB64, '-') && $remoteChecksumB64 !== $expectedSha256B64) {
-                    throw new RuntimeException("Remote object SHA-256 checksum mismatch: S3 reported {$remoteChecksumB64}, expected {$expectedSha256B64}.");
-                }
-            }
-
-            // Verify user-defined metadata sha256
+            // Strategy A: Provenance metadata check
             $remoteSha256Meta = $head['Metadata']['sha256'] ?? null;
             if ($remoteSha256Meta === null) {
                 throw new RuntimeException("Remote object missing expected sha256 metadata.");
@@ -271,8 +266,66 @@ class S3BackupUploader
             if (strtolower((string) $remoteSha256Meta) !== strtolower($expectedSha256Hex)) {
                 throw new RuntimeException("Remote object SHA-256 metadata mismatch: S3 reported {$remoteSha256Meta}, expected {$expectedSha256Hex}.");
             }
+
+            // Strategy B: Native S3 single-part checksum verification
+            $remoteChecksumB64 = $head['ChecksumSHA256'] ?? null;
+            $expectedSha256B64 = base64_encode(hex2bin($expectedSha256Hex) ?: '');
+            $fullChecksumVerified = false;
+
+            if ($remoteChecksumB64 !== null && $remoteChecksumB64 !== '') {
+                if (!str_contains($remoteChecksumB64, '-')) {
+                    if ($remoteChecksumB64 !== $expectedSha256B64) {
+                        throw new RuntimeException("Remote object SHA-256 checksum mismatch: S3 reported {$remoteChecksumB64}, expected {$expectedSha256B64}.");
+                    }
+                    $fullChecksumVerified = true;
+                }
+            }
+
+            // Strategy C: For multipart uploads (where S3 provides a composite part checksum) or when
+            // S3 did not return a single-part full-object checksum, stream the object to verify raw bytes
+            if (!$fullChecksumVerified) {
+                $this->verifyRemoteObjectStreamChecksum($client, $bucket, $key, $expectedSha256Hex);
+            }
         } catch (AwsException $e) {
             throw new RuntimeException("Verification of uploaded object [{$key}] failed: " . ($e->getAwsErrorMessage() ?: $e->getMessage()), 0, $e);
+        }
+    }
+
+    /**
+     * Stream object bytes directly from S3 to compute and assert full-object SHA-256 integrity.
+     */
+    protected function verifyRemoteObjectStreamChecksum(
+        S3Client $client,
+        string $bucket,
+        string $key,
+        string $expectedSha256Hex
+    ): void {
+        try {
+            $response = $client->getObject([
+                'Bucket' => $bucket,
+                'Key' => $key,
+            ]);
+
+            $body = $response['Body'] ?? null;
+            if (!is_object($body) || !method_exists($body, 'read')) {
+                throw new RuntimeException("Unable to read remote object stream for checksum verification.");
+            }
+
+            $hashCtx = hash_init('sha256');
+            while (!$body->eof()) {
+                $chunk = $body->read(16384);
+                if ($chunk === false) {
+                    break;
+                }
+                hash_update($hashCtx, $chunk);
+            }
+
+            $actualSha256 = hash_final($hashCtx);
+            if (strtolower($actualSha256) !== strtolower($expectedSha256Hex)) {
+                throw new RuntimeException("Remote object streamed SHA-256 mismatch: computed {$actualSha256}, expected {$expectedSha256Hex}.");
+            }
+        } catch (AwsException $e) {
+            throw new RuntimeException("Streaming verification failed for [{$key}]: " . ($e->getAwsErrorMessage() ?: $e->getMessage()), 0, $e);
         }
     }
 }

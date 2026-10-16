@@ -58,4 +58,35 @@ return [
     |
     */
     'temp_dir' => env('TIGERPOS_BACKUP_TEMP_DIR', storage_path('app/backup-temp')),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Automated Scheduling
+    |--------------------------------------------------------------------------
+    |
+    | Automatically register tigerpos:backup with Laravel's Console Scheduler.
+    | Defaults to running every six hours.
+    |
+    */
+    'schedule' => [
+        'enabled' => env('TIGERPOS_BACKUP_SCHEDULE_ENABLED', true),
+        'cron' => env('TIGERPOS_BACKUP_SCHEDULE_CRON', '0 */6 * * *'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Automated Backup Pruning (Opt-In)
+    |--------------------------------------------------------------------------
+    |
+    | Automated pruning of expired local and remote backup archives.
+    | For operational safety, this is disabled by default. When enabled,
+    | Laravel's Console Scheduler will register tigerpos:prune-backups --execute.
+    |
+    */
+    'prune' => [
+        'enabled' => env('TIGERPOS_BACKUP_PRUNE_ENABLED', false),
+        'cron' => env('TIGERPOS_BACKUP_PRUNE_CRON', '30 2 * * *'),
+    ],
 ];
+
+

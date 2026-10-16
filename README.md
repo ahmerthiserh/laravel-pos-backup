@@ -26,26 +26,58 @@ The package is designed to support the POS fleet running across both older and c
 
 - **Phase 1 (Initial Package Foundation)** - Complete
 - **Phase 2 (Local MySQL Backup Engine)** - Complete
-- **Phase 3 (Secure Amazon S3 Uploads)** - Complete:
-  - [x] Dedicated S3 upload service [`S3BackupUploader`](file:///home/tiger/Project/laravel-pos-backup/src/Services/S3BackupUploader.php)
-  - [x] Official AWS SDK for PHP (`aws/aws-sdk-php: ^3.200`) integration
-  - [x] Standard AWS SDK credential provider chain (IAM Roles, ECS Task Roles, standard env credentials)
-  - [x] Isolated S3 object key structure: `{prefix}/{pos_id}/database/{filename}`
-  - [x] Path traversal and segment injection sanitization
-  - [x] Private bucket enforcement (private ACL) and Server-Side Encryption (default SSE-S3 `AES256` or SSE-KMS via `kms_key_id`)
-  - [x] Streaming multipart upload support (`Aws\S3\ObjectUploader`) for large files
-  - [x] Remote object existence, size, and SHA-256 metadata verification
-  - [x] Local archive retention and `--local-only` command option
-  - [x] Sanitized error messages with non-secret logging
+- **Phase 3 (Secure Amazon S3 Uploads)** - Complete
+- **Phase 4, Step 1 (Automated Scheduling Integration)** - Complete:
+  - [x] Native integration with Laravel's Console Scheduler (`0 */6 * * *`)
+  - [x] Configuration-driven scheduling (`schedule.enabled` and `schedule.cron`)
+  - [x] Global package disabled toggle enforcement (`tigerpos-backup.enabled`)
+  - [x] Idempotent registration preventing duplicate schedule events
+- **Phase 4, Step 2 (Automated Retention Pruning)** - Complete:
+  - [x] Dual-scope pruning (local archives and Amazon S3 objects)
+  - [x] Dry-run simulation by default (`--execute` required for deletion)
+  - [x] Strict prefix, POS isolation, and regex filename pattern validation
+  - [x] Non-blocking file lock concurrency protection
+  - [x] Opt-in automated pruning scheduling (`prune.enabled`)
 
-> **Upcoming Phases**: Automated retention pruning and scheduled background execution.
+
+## Automated Scheduling & Cron Configuration
+
+The package automatically registers `tigerpos:backup` with Laravel's Console Scheduler to execute every six hours by default (`0 */6 * * *`).
+
+### Host Cron Requirement
+
+Laravel's scheduler does not run on its own; it requires the host operating system to execute `schedule:run` every minute. Ensure the host server has a single cron job configured for the web user:
+
+```bash
+* * * * * cd /path-to-your-pos-project && php artisan schedule:run >> /dev/null 2>&1
+```
+
+On shared hosting with cPanel or Plesk, add a Cron Job in the control panel targeting `php /home/username/path/artisan schedule:run` every minute (`* * * * *`).
+
+### Host Application Manual Scheduling (Alternative)
+
+If your host application prefers explicitly declaring scheduled commands in its own scheduler (e.g. `routes/console.php` in Laravel 11 or `app/Console/Kernel.php` in Laravel 9), disable package auto-scheduling:
+
+```env
+TIGERPOS_BACKUP_SCHEDULE_ENABLED=false
+```
+
+And manually register the command in your host scheduler:
+
+```php
+// In app/Console/Kernel.php (Laravel 9/10) or routes/console.php (Laravel 11)
+use Illuminate\Support\Facades\Schedule;
+
+Schedule::command('tigerpos:backup')->cron('0 */6 * * *');
+```
 
 ## Requirements & Shared Hosting Considerations
 
 - **Database Engine**: MySQL (>= 5.7 / 8.0) or MariaDB (>= 10.3).
 - **Dump Utility**: The system `mysqldump` CLI utility must be installed and executable in PATH.
 - **PHP Process Functions**: The host environment must permit process execution (`proc_open`). On restricted shared hosting where `proc_open` is listed in `disable_functions`, the backup command exits gracefully with a clear error.
-- **AWS S3 Access**: Outbound HTTPS (port 443) connectivity to AWS S3 endpoints.
+- **Dump Execution Timeout**: The dump process execution is subject to a hard timeout of 600 seconds (10 minutes). If a database dump and compression process exceeds this threshold, the command automatically sends SIGKILL to child processes (`mysqldump` and `gzip`), drains and closes open pipes, cleans up any partial archive, and exits with a failure status.
+- **AWS S3 Access & Modern Bucket Compatibility**: Outbound HTTPS (port 443) connectivity to AWS S3 endpoints. The package omits explicit ACLs during upload to ensure full compatibility with modern S3 buckets configured with Object Ownership set to *Bucket owner enforced* (ACLs disabled).
 
 ## Database Consistency & Dump Scope
 
@@ -77,6 +109,58 @@ Generate and verify local backup archive only (skip S3 upload):
 php artisan tigerpos:backup --local-only
 ```
 
+### Retention Pruning Command (`tigerpos:prune-backups`)
+
+Expired local backup archives and S3 objects exceeding `tigerpos-backup.retention_days` can be pruned using the `tigerpos:prune-backups` Artisan command.
+
+#### Dry-Run Mode (Default)
+By default, the command runs in **safe simulation mode** without deleting any files or remote objects:
+
+```bash
+php artisan tigerpos:prune-backups
+```
+
+This outputs candidates that would be deleted, along with their timestamps and paths.
+
+#### Execution Mode (Destructive)
+To actually delete eligible archives, supply the `--execute` flag:
+
+```bash
+php artisan tigerpos:prune-backups --execute
+```
+
+To restrict pruning solely to local storage (skipping Amazon S3):
+
+```bash
+php artisan tigerpos:prune-backups --execute --local-only
+```
+
+#### Retention Cutoff Logic & Safety Guarantees
+- **Cutoff Calculation**: Calculated in UTC as `time() - (retention_days * 86400)`. If `retention_days` is invalid, zero, or negative, the command aborts safely without deleting anything.
+- **Local Storage Pruning**:
+  - Scoped strictly to the resolved canonical `temp_dir`.
+  - Never traverses outside the directory or follows symbolic links.
+  - Matches only files with the exact POS archive pattern: `pos_backup_{pos_id}_YYYYMMDD_HHMMSS.sql.gz`.
+  - Requires **both** the filesystem modification time (`filemtime`) and the embedded filename timestamp to be older than the cutoff timestamp. Recent archives, temporary `.sql` dumps, subdirectories, and files belonging to other POS instances are strictly preserved.
+  - Re-evaluates each file immediately prior to deletion to minimize race conditions.
+- **Amazon S3 Pruning**:
+  - Scoped strictly to `{s3.prefix}/{pos_id}/database/`. Objects outside this prefix are never listed or touched.
+  - Paginates seamlessly across S3 `ListObjectsV2` results.
+  - Evaluates the object's `LastModified` UTC timestamp against the cutoff.
+  - Never modifies bucket ACLs, public access block configurations, or encryption settings.
+- **Concurrency Protection**: Uses a non-blocking process file lock (`flock`) to prevent overlapping pruning operations on the same station.
+
+## Automated Pruning Scheduling (Opt-In)
+
+For operational security, automated pruning is **disabled by default**. To have Laravel's Console Scheduler automatically execute `tigerpos:prune-backups --execute` on a schedule, set:
+
+```env
+TIGERPOS_BACKUP_PRUNE_ENABLED=true
+TIGERPOS_BACKUP_PRUNE_CRON="30 2 * * *"
+```
+
+> **Note**: Automated backup creation (`TIGERPOS_BACKUP_SCHEDULE_ENABLED`) and automated pruning (`TIGERPOS_BACKUP_PRUNE_ENABLED`) operate completely independently.
+
 ## S3 Object Key Structure
 
 Backups are uploaded to an isolated, multi-tenant path hierarchy:
@@ -90,7 +174,9 @@ Backups are uploaded to an isolated, multi-tenant path hierarchy:
 
 ## Required AWS IAM Permissions
 
-To allow POS applications to upload and verify backups, the IAM user or role requires minimum least-privilege permissions on the target bucket and object prefix:
+### 1. Standard Backup Permissions (Least-Privilege)
+
+For POS stations that only perform backups and uploads, grant standard read/write permissions on the bucket prefix:
 
 ```json
 {
@@ -115,11 +201,61 @@ To allow POS applications to upload and verify backups, the IAM user or role req
 > - `s3:AbortMultipartUpload` allows the AWS SDK's `ObjectUploader` to clean up incomplete multipart upload parts if a network failure or error interrupts large uploads.
 > - If using AWS KMS for customer-managed server-side encryption (`TIGERPOS_BACKUP_AWS_KMS_KEY_ID`), the IAM entity also requires `kms:GenerateDataKey` and `kms:Decrypt` on the specific KMS key ARN.
 
+### 2. Pruning Permissions (Destructive — Use with Care)
+
+If you enable remote pruning from the POS application via `tigerpos:prune-backups --execute` or `TIGERPOS_BACKUP_PRUNE_ENABLED=true`, the station's IAM role must also be granted `s3:ListBucket` and `s3:DeleteObject`, strictly scoped to the POS station's path:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowPOSBackupUploads",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:AbortMultipartUpload"
+            ],
+            "Resource": "arn:aws:s3:::your-backup-bucket-name/pos-backups/store-01/*"
+        },
+        {
+            "Sid": "AllowPOSBackupPruningList",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket"
+            ],
+            "Resource": "arn:aws:s3:::your-backup-bucket-name",
+            "Condition": {
+                "StringLike": {
+                    "s3:prefix": [
+                        "pos-backups/store-01/database/*"
+                    ]
+                }
+            }
+        },
+        {
+            "Sid": "AllowPOSBackupPruningDelete",
+            "Effect": "Allow",
+            "Action": [
+                "s3:DeleteObject"
+            ],
+            "Resource": "arn:aws:s3:::your-backup-bucket-name/pos-backups/store-01/database/*"
+        }
+    ]
+}
+```
+
+> [!WARNING]
+> **Operational Security Consideration**: Enabling S3 pruning grants permanent deletion privileges (`s3:DeleteObject`) to POS endpoint credentials. If POS endpoints are in physically vulnerable locations, consider keeping pruning disabled on the client and instead using **AWS S3 Lifecycle Rules** directly on the bucket to automatically expire objects older than 30 days. This achieves remote retention without granting delete permissions to POS stations.
+
 ## Upload Integrity & Verification Model
 
-The uploader implements a two-tier integrity verification model:
-1. **End-to-End Object Verification**: The local file's SHA-256 is computed before upload and stored in user metadata (`x-amz-meta-sha256`). After upload, a `HeadObject` request retrieves and asserts the remote size (`ContentLength`) and metadata SHA-256 match the local backup.
-2. **Native S3 Checksum Validation**: In addition to user metadata, requests enable AWS S3's native `ChecksumAlgorithm=SHA256` (`ChecksumMode=ENABLED`), allowing S3 to compute and store a cryptographically validated server-side checksum. For single-part uploads, this checksum directly validates object bytes on S3; for multipart uploads, AWS S3 calculates a composite checksum per part.
+The package guarantees cryptographic and structural backup integrity before reporting success:
+1. **Local Pre-Upload Integrity**: Before upload, the `.sql.gz` dump is tested with `gzip -t` and uncompressed in-memory to verify valid MySQL/MariaDB syntax signatures and non-zero contents. The full local file's SHA-256 digest is calculated and attached to the upload request as user metadata (`x-amz-meta-sha256`).
+2. **Native S3 SHA-256 Request**: Uploads specify `ChecksumAlgorithm=SHA256`, instructing AWS S3 to compute a server-side cryptographic checksum.
+3. **Single-Part Upload Verification**: For single-part uploads, a post-upload `HeadObject` with `ChecksumMode=ENABLED` retrieves AWS S3's native `ChecksumSHA256` and asserts it equals the Base64 SHA-256 digest of the local file.
+4. **Multipart Upload Verification**: For multipart uploads, AWS S3 produces a composite checksum per part (appended with `-N`) rather than a full-file digest. In this scenario, the uploader streams the object directly from S3 via `GetObject`, computes the full-object SHA-256 digest on the fly, and asserts that the remote byte stream strictly equals the local file's SHA-256 digest. User-defined metadata alone is never treated as standalone proof of remote byte integrity.
 
 ## Installation
 
@@ -147,5 +283,10 @@ This creates `config/tigerpos-backup.php` where you can customize backup paramet
 | `TIGERPOS_BACKUP_AWS_BUCKET` | Target AWS S3 bucket name | `""` |
 | `TIGERPOS_BACKUP_S3_PREFIX` | S3 folder key prefix | `pos-backups` |
 | `TIGERPOS_BACKUP_AWS_KMS_KEY_ID` | Optional KMS Key ID / ARN for SSE-KMS | `null` (uses SSE-S3 `AES256`) |
-| `TIGERPOS_BACKUP_RETENTION_DAYS` | Remote backup retention window | `30` |
+| `TIGERPOS_BACKUP_SCHEDULE_ENABLED` | Toggle automated six-hour scheduling | `true` |
+| `TIGERPOS_BACKUP_SCHEDULE_CRON` | Cron expression for automated backup | `0 */6 * * *` |
+| `TIGERPOS_BACKUP_PRUNE_ENABLED` | Toggle automated retention pruning | `false` |
+| `TIGERPOS_BACKUP_PRUNE_CRON` | Cron expression for automated pruning | `30 2 * * *` |
+| `TIGERPOS_BACKUP_RETENTION_DAYS` | Backup retention window in days | `30` |
 | `TIGERPOS_BACKUP_TEMP_DIR` | Local temporary directory for dumps | `storage_path('app/backup-temp')` |
+

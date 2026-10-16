@@ -91,6 +91,7 @@ class S3BackupUploaderTest extends TestCase
         // 2. HeadObject response for verification
         $mock->append(new Result([
             'ContentLength' => $fileSize,
+            'ChecksumSHA256' => base64_encode(hex2bin($expectedSha256) ?: ''),
             'Metadata' => [
                 'sha256' => $expectedSha256,
                 'pos-id' => 'pos_store_1',
@@ -144,6 +145,7 @@ class S3BackupUploaderTest extends TestCase
         });
         $mock->append(new Result([
             'ContentLength' => $fileSize,
+            'ChecksumSHA256' => base64_encode(hex2bin($expectedSha256) ?: ''),
             'Metadata' => ['sha256' => $expectedSha256],
         ]));
 
@@ -327,6 +329,87 @@ class S3BackupUploaderTest extends TestCase
             $this->expectExceptionMessage('Remote object SHA-256 metadata mismatch');
 
             $uploader->upload($file, 'pos-meta-mismatch', ['bucket' => 'test-bucket']);
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    public function test_upload_multipart_streams_and_verifies_full_sha256(): void
+    {
+        $file = sys_get_temp_dir() . '/upload_mp_success_' . uniqid() . '.sql.gz';
+        $content = '-- MULTIPART DATA ' . str_repeat('0123456789ABCDEF', 100);
+        file_put_contents($file, $content);
+        $fileSize = filesize($file);
+        $expectedSha256 = hash_file('sha256', $file);
+
+        $mock = new MockHandler();
+        // 1. PutObject response
+        $mock->append(new Result(['ETag' => '"dummy-etag"']));
+        // 2. HeadObject returns multipart composite checksum with -N suffix
+        $mock->append(new Result([
+            'ContentLength' => $fileSize,
+            'ChecksumSHA256' => 'compositeChecksumHash-2',
+            'Metadata' => ['sha256' => $expectedSha256],
+        ]));
+        // 3. GetObject returns stream of object bytes for verification
+        $mock->append(new Result([
+            'Body' => \GuzzleHttp\Psr7\Utils::streamFor($content),
+        ]));
+
+        $s3Client = new S3Client([
+            'version' => 'latest',
+            'region' => 'us-east-1',
+            'handler' => $mock,
+            'credentials' => ['key' => 'K', 'secret' => 'S'],
+        ]);
+
+        $uploader = new S3BackupUploader($s3Client);
+
+        try {
+            $result = $uploader->upload($file, 'pos-mp', ['bucket' => 'mp-bucket']);
+            $this->assertEquals('mp-bucket', $result['bucket']);
+            $this->assertEquals($expectedSha256, $result['sha256']);
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    public function test_upload_multipart_fails_when_streamed_sha256_mismatches(): void
+    {
+        $file = sys_get_temp_dir() . '/upload_mp_fail_' . uniqid() . '.sql.gz';
+        $content = '-- MULTIPART DATA ORIGINAL';
+        file_put_contents($file, $content);
+        $fileSize = filesize($file);
+        $expectedSha256 = hash_file('sha256', $file);
+
+        $mock = new MockHandler();
+        // 1. PutObject response
+        $mock->append(new Result(['ETag' => '"dummy-etag"']));
+        // 2. HeadObject returns multipart composite checksum
+        $mock->append(new Result([
+            'ContentLength' => $fileSize,
+            'ChecksumSHA256' => 'compositeChecksum-1',
+            'Metadata' => ['sha256' => $expectedSha256],
+        ]));
+        // 3. GetObject returns corrupted data
+        $mock->append(new Result([
+            'Body' => \GuzzleHttp\Psr7\Utils::streamFor('-- CORRUPTED STREAM DATA'),
+        ]));
+
+        $s3Client = new S3Client([
+            'version' => 'latest',
+            'region' => 'us-east-1',
+            'handler' => $mock,
+            'credentials' => ['key' => 'K', 'secret' => 'S'],
+        ]);
+
+        $uploader = new S3BackupUploader($s3Client);
+
+        try {
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('Remote object streamed SHA-256 mismatch');
+
+            $uploader->upload($file, 'pos-mp-corrupt', ['bucket' => 'mp-bucket']);
         } finally {
             @unlink($file);
         }

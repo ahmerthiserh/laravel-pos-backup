@@ -16,7 +16,9 @@ abstract class TestCase extends OrchestraTestCase
 
     protected function defineEnvironment($app): void
     {
-        $app['config']->set('tigerpos-backup.enabled', true);
+        if ($app['config']->get('tigerpos-backup.enabled') === null) {
+            $app['config']->set('tigerpos-backup.enabled', true);
+        }
         $app['config']->set('tigerpos-backup.pos_id', 'test-pos-01');
         $app['config']->set('tigerpos-backup.temp_dir', sys_get_temp_dir() . '/tigerpos-tests');
 
