@@ -100,7 +100,16 @@ class PruneBackupsCommandTest extends TestCase
         config(['tigerpos-backup.retention_days' => 0]);
 
         $this->artisan('tigerpos:prune-backups')
-            ->expectsOutputToContain('Pruning configuration error: Retention days must be greater than zero.')
+            ->expectsOutputToContain('Pruning configuration error: Retention days must be a positive whole integer')
+            ->assertFailed();
+    }
+
+    public function test_prune_command_fails_safely_when_retention_days_fractional(): void
+    {
+        config(['tigerpos-backup.retention_days' => '3.5']);
+
+        $this->artisan('tigerpos:prune-backups')
+            ->expectsOutputToContain('Pruning configuration error: Retention days cannot be a fractional value.')
             ->assertFailed();
     }
 
@@ -171,7 +180,17 @@ class PruneBackupsCommandTest extends TestCase
         config(['tigerpos-backup.retention_days' => null]);
 
         $this->artisan('tigerpos:prune-backups')
-            ->expectsOutputToContain('Pruning configuration error: Retention days must be a valid positive integer.')
+            ->expectsOutputToContain('Pruning configuration error: Retention days must be a valid positive whole number.')
+            ->assertFailed();
+    }
+
+    public function test_prune_command_fails_when_local_directory_missing(): void
+    {
+        config(['tigerpos-backup.temp_dir' => sys_get_temp_dir() . '/non_existent_dir_' . uniqid()]);
+
+        $this->artisan('tigerpos:prune-backups')
+            ->expectsOutputToContain('Local pruning failed: Configured local backup directory does not exist')
+            ->expectsOutputToContain('Pruning finished with errors.')
             ->assertFailed();
     }
 

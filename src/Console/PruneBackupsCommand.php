@@ -146,47 +146,45 @@ class PruneBackupsCommand extends Command
         if ($localOnly) {
             $this->line('');
             $this->info("Skipping Amazon S3 pruning (--local-only specified).");
-            return $hasFailure ? Command::FAILURE : Command::SUCCESS;
-        }
+        } else {
+            $s3Config = config('tigerpos-backup.s3', []);
+            $bucket = (string) ($s3Config['bucket'] ?? '');
 
-        $s3Config = config('tigerpos-backup.s3', []);
-        $bucket = (string) ($s3Config['bucket'] ?? '');
+            $this->line('');
+            $this->info("--- Amazon S3 Backup Pruning ---");
 
-        $this->line('');
-        $this->info("--- Amazon S3 Backup Pruning ---");
+            if ($bucket === '') {
+                $this->warn("S3 bucket is not configured (tigerpos-backup.s3.bucket). Skipping remote pruning.");
+            } else {
+                $this->line("Bucket: {$bucket}");
 
-        if ($bucket === '') {
-            $this->warn("S3 bucket is not configured (tigerpos-backup.s3.bucket). Skipping remote pruning.");
-            return $hasFailure ? Command::FAILURE : Command::SUCCESS;
-        }
+                try {
+                    $s3Result = $this->prunerService->pruneS3($s3Config, $posId, $retentionDays, $isExecute);
 
-        $this->line("Bucket: {$bucket}");
+                    if ($isExecute) {
+                        $deletedCount = count($s3Result['deleted']);
+                        $failedCount = count($s3Result['failed']);
 
-        try {
-            $s3Result = $this->prunerService->pruneS3($s3Config, $posId, $retentionDays, $isExecute);
-
-            if ($isExecute) {
-                $deletedCount = count($s3Result['deleted']);
-                $failedCount = count($s3Result['failed']);
-
-                $this->info("S3 Pruning Results: {$deletedCount} deleted, {$failedCount} failed.");
-                foreach ($s3Result['deleted'] as $key) {
-                    $this->line("  [DELETED] " . $key);
-                }
-                foreach ($s3Result['failed'] as $key) {
-                    $this->error("  [FAILED]  " . $key);
+                        $this->info("S3 Pruning Results: {$deletedCount} deleted, {$failedCount} failed.");
+                        foreach ($s3Result['deleted'] as $key) {
+                            $this->line("  [DELETED] " . $key);
+                        }
+                        foreach ($s3Result['failed'] as $key) {
+                            $this->error("  [FAILED]  " . $key);
+                            $hasFailure = true;
+                        }
+                    } else {
+                        $eligibleCount = count($s3Result['eligible']);
+                        $this->info("S3 Candidates: {$eligibleCount} object(s) eligible for pruning.");
+                        foreach ($s3Result['eligible'] as $key) {
+                            $this->line("  [WOULD DELETE] " . $key);
+                        }
+                    }
+                } catch (Throwable $e) {
+                    $this->error("S3 pruning encountered an error: " . $e->getMessage());
                     $hasFailure = true;
                 }
-            } else {
-                $eligibleCount = count($s3Result['eligible']);
-                $this->info("S3 Candidates: {$eligibleCount} object(s) eligible for pruning.");
-                foreach ($s3Result['eligible'] as $key) {
-                    $this->line("  [WOULD DELETE] " . $key);
-                }
             }
-        } catch (Throwable $e) {
-            $this->error("S3 pruning encountered an error: " . $e->getMessage());
-            $hasFailure = true;
         }
 
         $this->line('');

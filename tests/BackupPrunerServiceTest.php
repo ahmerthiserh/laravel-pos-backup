@@ -60,27 +60,56 @@ class BackupPrunerServiceTest extends TestCase
         $this->assertEquals(30, $this->pruner->validateRetentionDays(30));
         $this->assertEquals(7, $this->pruner->validateRetentionDays('7'));
         $this->assertEquals(1, $this->pruner->validateRetentionDays(1));
+        $this->assertEquals(36500, $this->pruner->validateRetentionDays(36500));
     }
 
     public function test_validate_retention_days_rejects_zero_or_negative(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('greater than zero');
+        $this->expectExceptionMessage('positive whole integer');
         $this->pruner->validateRetentionDays(0);
     }
 
     public function test_validate_retention_days_rejects_negative_value(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('greater than zero');
+        $this->expectExceptionMessage('positive whole integer');
         $this->pruner->validateRetentionDays(-5);
     }
 
     public function test_validate_retention_days_rejects_non_numeric(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('positive integer');
+        $this->expectExceptionMessage('positive whole integer');
         $this->pruner->validateRetentionDays('invalid');
+    }
+
+    public function test_validate_retention_days_rejects_fractional_values(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('fractional value');
+        $this->pruner->validateRetentionDays(2.5);
+    }
+
+    public function test_validate_retention_days_rejects_fractional_string(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('fractional value');
+        $this->pruner->validateRetentionDays('14.5');
+    }
+
+    public function test_validate_retention_days_rejects_boolean(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('positive whole number');
+        $this->pruner->validateRetentionDays(true);
+    }
+
+    public function test_validate_retention_days_rejects_overflow(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('between 1 and 36500');
+        $this->pruner->validateRetentionDays(50000);
     }
 
     public function test_calculate_cutoff_timestamp(): void
@@ -210,14 +239,45 @@ class BackupPrunerServiceTest extends TestCase
         }
     }
 
-    public function test_local_prune_handles_non_existent_directory_gracefully(): void
+    public function test_local_prune_fails_when_directory_missing(): void
     {
         $nonExistent = $this->testDir . '/does_not_exist';
-        $result = $this->pruner->pruneLocal($nonExistent, 'test-pos-01', 30, true);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Configured local backup directory does not exist');
+
+        $this->pruner->pruneLocal($nonExistent, 'test-pos-01', 30, true);
+    }
+
+    public function test_local_prune_rejects_invalid_calendar_dates(): void
+    {
+        $now = time();
+
+        // Feb 30th (impossible calendar date)
+        $invalidDate1 = '20230230_120000';
+        $file1 = $this->testDir . "/pos_backup_test-pos-01_{$invalidDate1}.sql.gz";
+        file_put_contents($file1, 'invalid date');
+        touch($file1, $now - (40 * 86400));
+
+        // Month 13 (impossible month)
+        $invalidDate2 = '20231301_120000';
+        $file2 = $this->testDir . "/pos_backup_test-pos-01_{$invalidDate2}.sql.gz";
+        file_put_contents($file2, 'invalid month');
+        touch($file2, $now - (40 * 86400));
+
+        // Hour 25 (impossible time)
+        $invalidDate3 = '20230101_250000';
+        $file3 = $this->testDir . "/pos_backup_test-pos-01_{$invalidDate3}.sql.gz";
+        file_put_contents($file3, 'invalid hour');
+        touch($file3, $now - (40 * 86400));
+
+        $result = $this->pruner->pruneLocal($this->testDir, 'test-pos-01', 30, true, $now);
 
         $this->assertEmpty($result['eligible']);
         $this->assertEmpty($result['deleted']);
-        $this->assertEmpty($result['failed']);
+        $this->assertFileExists($file1);
+        $this->assertFileExists($file2);
+        $this->assertFileExists($file3);
     }
 
     public function test_s3_prune_dry_run_identifies_expired_objects_without_deleting(): void
@@ -433,6 +493,62 @@ class BackupPrunerServiceTest extends TestCase
             null,
             $s3Client
         );
+    }
+
+    public function test_s3_prune_pagination_failure_aborts_without_deleting_earlier_pages(): void
+    {
+        $now = 1700000000;
+        $mock = new MockHandler();
+
+        $prefix = 'pos-backups/test-pos-01/database/';
+        $expiredKey = $prefix . 'pos_backup_test-pos-01_20230901_120000.sql.gz';
+
+        // Page 1 succeeds with an expired object
+        $mock->append(new Result([
+            'IsTruncated' => true,
+            'NextContinuationToken' => 'token-page-2',
+            'Contents' => [
+                [
+                    'Key' => $expiredKey,
+                    'LastModified' => new DateTimeImmutable('@' . ($now - (60 * 86400))),
+                ],
+            ],
+        ]));
+
+        // Page 2 fails with network/IAM error
+        $mock->append(function (CommandInterface $cmd) {
+            return new AwsException('Page 2 Connection Lost', $cmd);
+        });
+
+        // If deleteObject were invoked, this would be consumed, but it must NOT be called
+        $deleteCalled = false;
+        $mock->append(function (CommandInterface $cmd) use (&$deleteCalled) {
+            $deleteCalled = true;
+            return new Result([]);
+        });
+
+        $s3Client = new S3Client([
+            'version' => 'latest',
+            'region' => 'us-east-1',
+            'handler' => $mock,
+            'credentials' => ['key' => 'MOCK_KEY', 'secret' => 'MOCK_SECRET'],
+        ]);
+
+        try {
+            $this->pruner->pruneS3(
+                ['bucket' => 'test-bucket', 'prefix' => 'pos-backups'],
+                'test-pos-01',
+                30,
+                true,
+                $now,
+                $s3Client
+            );
+            $this->fail('Expected RuntimeException on pagination failure was not thrown.');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('Failed to list S3 backup objects', $e->getMessage());
+        }
+
+        $this->assertFalse($deleteCalled, 'deleteObject must never be called if pagination fails');
     }
 }
 

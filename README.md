@@ -148,7 +148,7 @@ php artisan tigerpos:prune-backups --execute --local-only
   - Paginates seamlessly across S3 `ListObjectsV2` results.
   - Evaluates the object's `LastModified` UTC timestamp against the cutoff.
   - Never modifies bucket ACLs, public access block configurations, or encryption settings.
-- **Concurrency Protection**: Uses a non-blocking process file lock (`flock`) to prevent overlapping pruning operations on the same station.
+- **Concurrency Protection**: Uses a non-blocking process file lock (`flock`) in the system temporary directory to prevent overlapping pruning operations on the same station. Note: `flock` provides host-local process isolation and is not a distributed lock across independent servers or containers.
 
 ## Automated Pruning Scheduling (Opt-In)
 
@@ -289,4 +289,3 @@ This creates `config/tigerpos-backup.php` where you can customize backup paramet
 | `TIGERPOS_BACKUP_PRUNE_CRON` | Cron expression for automated pruning | `30 2 * * *` |
 | `TIGERPOS_BACKUP_RETENTION_DAYS` | Backup retention window in days | `30` |
 | `TIGERPOS_BACKUP_TEMP_DIR` | Local temporary directory for dumps | `storage_path('app/backup-temp')` |
-

@@ -30,16 +30,27 @@ class BackupPrunerService
      */
     public function validateRetentionDays($retentionDays): int
     {
-        if ($retentionDays === null || $retentionDays === '' || !is_numeric($retentionDays)) {
-            throw new InvalidArgumentException("Retention days must be a valid positive integer.");
+        if ($retentionDays === null || $retentionDays === '' || is_bool($retentionDays)) {
+            throw new InvalidArgumentException("Retention days must be a valid positive whole number.");
         }
 
-        $days = (int) $retentionDays;
-        if ($days <= 0) {
-            throw new InvalidArgumentException("Retention days must be greater than zero.");
+        if (is_float($retentionDays) && floor($retentionDays) != $retentionDays) {
+            throw new InvalidArgumentException("Retention days cannot be a fractional value.");
         }
 
-        return $days;
+        if (is_string($retentionDays) && (str_contains($retentionDays, '.') || str_contains($retentionDays, ','))) {
+            throw new InvalidArgumentException("Retention days cannot be a fractional value.");
+        }
+
+        $filtered = filter_var($retentionDays, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 1, 'max_range' => 36500],
+        ]);
+
+        if ($filtered === false) {
+            throw new InvalidArgumentException("Retention days must be a positive whole integer between 1 and 36500.");
+        }
+
+        return $filtered;
     }
 
     /**
@@ -48,8 +59,18 @@ class BackupPrunerService
      */
     public function calculateCutoffTimestamp(int $retentionDays, ?int $now = null): int
     {
+        if ($retentionDays < 1 || $retentionDays > 36500) {
+            throw new InvalidArgumentException("Retention days out of allowable range for cutoff calculation.");
+        }
+
         $current = $now !== null ? $now : time();
-        return $current - ($retentionDays * 86400);
+        $cutoff = $current - ($retentionDays * 86400);
+
+        if ($cutoff >= $current || $cutoff <= 0) {
+            throw new InvalidArgumentException("Calculated cutoff timestamp overflowed or resulted in an invalid date.");
+        }
+
+        return $cutoff;
     }
 
     /**
@@ -86,19 +107,23 @@ class BackupPrunerService
             'failed' => [],
         ];
 
-        // Safely handle missing directory
+        // Accurately report missing or unreadable local backup directory
+        if (!file_exists($tempDir)) {
+            throw new RuntimeException("Configured local backup directory does not exist: [{$tempDir}].");
+        }
+
         if (!is_dir($tempDir)) {
-            return $result;
+            throw new RuntimeException("Configured local backup path is not a directory: [{$tempDir}].");
         }
 
         $realTempDir = realpath($tempDir);
-        if ($realTempDir === false || !is_dir($realTempDir)) {
-            return $result;
+        if ($realTempDir === false || !is_dir($realTempDir) || !is_readable($realTempDir)) {
+            throw new RuntimeException("Configured local backup directory is not readable: [{$tempDir}].");
         }
 
         $entries = @scandir($realTempDir);
         if (!is_array($entries)) {
-            return $result;
+            throw new RuntimeException("Failed to scan contents of local backup directory: [{$tempDir}].");
         }
 
         $filenameRegex = $this->getFilenameRegex($posId);
@@ -138,8 +163,27 @@ class BackupPrunerService
             }
 
             $datePart = $matches[1] . '_' . $matches[2];
-            $dt = DateTimeImmutable::createFromFormat('Ymd_His', $datePart);
-            $filenameTimestamp = $dt instanceof DateTimeInterface ? $dt->getTimestamp() : 0;
+            // Explicitly parse filename timestamp in UTC and reject invalid calendar dates
+            $dt = DateTimeImmutable::createFromFormat('!Ymd_His', $datePart, new \DateTimeZone('UTC'));
+            if ($dt === false) {
+                continue;
+            }
+
+            $errors = DateTimeImmutable::getLastErrors();
+            if ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0)) {
+                // Calendar rollover or parse error (e.g. Feb 30)
+                continue;
+            }
+
+            if ($dt->format('Ymd_His') !== $datePart) {
+                // Formatting back must strictly equal the input to prevent date roll-overs
+                continue;
+            }
+
+            $filenameTimestamp = $dt->getTimestamp();
+            if ($filenameTimestamp <= 0) {
+                continue;
+            }
 
             // A file is only eligible if BOTH its mtime and filename date are older than the cutoff.
             // If either indicates it was created within the retention window, preserve it.
@@ -153,12 +197,19 @@ class BackupPrunerService
             }
 
             // Pre-validation immediately before deletion to minimize race conditions
+            clearstatcache(true, $filePath);
+            $currentMtime = @filemtime($filePath);
+            $realCurrentPath = realpath($filePath);
+
             if (
+                $realCurrentPath !== false &&
+                $realCurrentPath === $filePath &&
+                str_starts_with($realCurrentPath, $realTempDir . DIRECTORY_SEPARATOR) &&
                 file_exists($filePath) &&
                 is_file($filePath) &&
                 !is_link($filePath) &&
-                realpath($filePath) === $filePath &&
-                (@filemtime($filePath) < $cutoff)
+                $currentMtime !== false &&
+                $currentMtime < $cutoff
             ) {
                 if (@unlink($filePath)) {
                     $result['deleted'][] = $filePath;
@@ -252,19 +303,20 @@ class BackupPrunerService
                         continue;
                     }
 
-                    // Strict safety check 3: S3 LastModified timestamp check
+                    // Strict safety check 3: S3 LastModified timestamp check in UTC
                     $lastModified = $object['LastModified'] ?? null;
                     if ($lastModified instanceof DateTimeInterface) {
                         $lastModifiedTimestamp = $lastModified->getTimestamp();
-                    } elseif (is_string($lastModified)) {
-                        $lastModifiedTimestamp = (int) strtotime($lastModified);
+                    } elseif (is_string($lastModified) && $lastModified !== '') {
+                        $dt = date_create_immutable($lastModified, new \DateTimeZone('UTC'));
+                        $lastModifiedTimestamp = $dt instanceof DateTimeInterface ? $dt->getTimestamp() : 0;
                     } else {
                         // If LastModified is absent or unknown, skip deletion for safety
                         continue;
                     }
 
-                    if ($lastModifiedTimestamp >= $cutoff) {
-                        // Younger than retention period; preserve
+                    if ($lastModifiedTimestamp <= 0 || $lastModifiedTimestamp >= $cutoff) {
+                        // Younger than retention period or invalid timestamp; preserve
                         continue;
                     }
 
@@ -283,6 +335,11 @@ class BackupPrunerService
 
         // Perform single-object deletions with isolated error tracking
         foreach ($result['eligible'] as $key) {
+            if (!str_starts_with($key, $expectedPrefix) || !preg_match($filenameRegex, basename($key))) {
+                $result['failed'][] = $key;
+                continue;
+            }
+
             try {
                 $client->deleteObject([
                     'Bucket' => $bucket,

@@ -74,7 +74,7 @@ class TigerPosBackupServiceProvider extends ServiceProvider
             if ($scheduleEnabled) {
                 $hasBackupEvent = false;
                 foreach ($schedule->events() as $event) {
-                    if (isset($event->command) && str_contains($event->command, 'tigerpos:backup')) {
+                    if (isset($event->command) && preg_match('/[\'"]tigerpos:backup[\'"]|\btigerpos:backup\b/', (string) $event->command)) {
                         $hasBackupEvent = true;
                         break;
                     }
@@ -92,7 +92,7 @@ class TigerPosBackupServiceProvider extends ServiceProvider
             if ($pruneEnabled) {
                 $hasPruneEvent = false;
                 foreach ($schedule->events() as $event) {
-                    if (isset($event->command) && str_contains($event->command, 'tigerpos:prune-backups')) {
+                    if (isset($event->command) && preg_match('/[\'"]tigerpos:prune-backups[\'"]|\btigerpos:prune-backups\b/', (string) $event->command)) {
                         $hasPruneEvent = true;
                         break;
                     }
