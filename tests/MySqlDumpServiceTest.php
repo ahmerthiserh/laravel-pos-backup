@@ -242,8 +242,11 @@ class MySqlDumpServiceTest extends TestCase
         $publicDir = sys_get_temp_dir() . '/test_public_root_' . uniqid();
         @mkdir($publicDir, 0755, true);
         $subTemp = $publicDir . '/backups';
-
-        $this->app->usePublicPath($publicDir);
+         if (method_exists($this->app, 'usePublicPath')) {
+            $this->app->usePublicPath($publicDir);
+        } else {
+            $this->app->instance('path.public', $publicDir);
+        }
 
         try {
             $this->expectException(RuntimeException::class);

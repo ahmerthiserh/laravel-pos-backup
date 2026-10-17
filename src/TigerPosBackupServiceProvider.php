@@ -55,55 +55,56 @@ class TigerPosBackupServiceProvider extends ServiceProvider
      */
     protected function registerSchedule(): void
     {
-        $this->app->booted(function () {
-            // Respect global package enabled setting
-            $enabled = config('tigerpos-backup.enabled', true);
-            if (!$enabled) {
-                return;
-            }
-
-            if (!$this->app->bound(\Illuminate\Console\Scheduling\Schedule::class)) {
-                return;
-            }
-
-            /** @var \Illuminate\Console\Scheduling\Schedule $schedule */
-            $schedule = $this->app->make(\Illuminate\Console\Scheduling\Schedule::class);
-
-            // 1. Scheduled Backup (every six hours by default)
-            $scheduleEnabled = config('tigerpos-backup.schedule.enabled', true);
-            if ($scheduleEnabled) {
-                $hasBackupEvent = false;
-                foreach ($schedule->events() as $event) {
-                    if (isset($event->command) && preg_match('/[\'"]tigerpos:backup[\'"]|\btigerpos:backup\b/', (string) $event->command)) {
-                        $hasBackupEvent = true;
-                        break;
-                    }
-                }
-
-                if (!$hasBackupEvent) {
-                    $cronExpression = (string) config('tigerpos-backup.schedule.cron', '0 */6 * * *');
-                    $schedule->command(\Tiger\PosBackup\Console\BackupCommand::class)
-                        ->cron($cronExpression);
-                }
-            }
-
-            // 2. Scheduled Pruning (opt-in only, disabled by default)
-            $pruneEnabled = config('tigerpos-backup.prune.enabled', false);
-            if ($pruneEnabled) {
-                $hasPruneEvent = false;
-                foreach ($schedule->events() as $event) {
-                    if (isset($event->command) && preg_match('/[\'"]tigerpos:prune-backups[\'"]|\btigerpos:prune-backups\b/', (string) $event->command)) {
-                        $hasPruneEvent = true;
-                        break;
-                    }
-                }
-
-                if (!$hasPruneEvent) {
-                    $pruneCron = (string) config('tigerpos-backup.prune.cron', '30 2 * * *');
-                    $schedule->command(\Tiger\PosBackup\Console\PruneBackupsCommand::class, ['--execute'])
-                        ->cron($pruneCron);
-                }
-            }
+        $this->callAfterResolving(\Illuminate\Console\Scheduling\Schedule::class, function (\Illuminate\Console\Scheduling\Schedule $schedule) {
+            $this->configureSchedule($schedule);
         });
+    }
+
+    /**
+     * Configure automated backup and pruning events with the given Schedule instance.
+     */
+    protected function configureSchedule(\Illuminate\Console\Scheduling\Schedule $schedule): void
+    {
+        // Respect global package enabled setting
+        $enabled = config('tigerpos-backup.enabled', true);
+        if (!$enabled) {
+            return;
+        }
+
+        // 1. Scheduled Backup (every six hours by default)
+        $scheduleEnabled = config('tigerpos-backup.schedule.enabled', true);
+        if ($scheduleEnabled) {
+            $hasBackupEvent = false;
+            foreach ($schedule->events() as $event) {
+                if (isset($event->command) && preg_match('/[\'"]tigerpos:backup[\'"]|\btigerpos:backup\b/', (string) $event->command)) {
+                    $hasBackupEvent = true;
+                    break;
+                }
+            }
+
+            if (!$hasBackupEvent) {
+                $cronExpression = (string) config('tigerpos-backup.schedule.cron', '0 */6 * * *');
+                $schedule->command(\Tiger\PosBackup\Console\BackupCommand::class)
+                    ->cron($cronExpression);
+            }
+        }
+
+        // 2. Scheduled Pruning (opt-in only, disabled by default)
+        $pruneEnabled = config('tigerpos-backup.prune.enabled', false);
+        if ($pruneEnabled) {
+            $hasPruneEvent = false;
+            foreach ($schedule->events() as $event) {
+                if (isset($event->command) && preg_match('/[\'"]tigerpos:prune-backups[\'"]|\btigerpos:prune-backups\b/', (string) $event->command)) {
+                    $hasPruneEvent = true;
+                    break;
+                }
+            }
+
+            if (!$hasPruneEvent) {
+                $pruneCron = (string) config('tigerpos-backup.prune.cron', '30 2 * * *');
+                $schedule->command(\Tiger\PosBackup\Console\PruneBackupsCommand::class, ['--execute'])
+                    ->cron($pruneCron);
+            }
+        }
     }
 }

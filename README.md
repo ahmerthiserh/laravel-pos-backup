@@ -22,7 +22,7 @@ The package is designed to support the POS fleet running across both older and c
 | **Laravel 12** | `^12.0` | PHP `^8.2 \|\| ^8.3 \|\| ^8.4` |
 | **Laravel 13** | `^13.0` | PHP `^8.3 \|\| ^8.4` |
 
-> Package PHP requirement: `^8.0 || ^8.1 || ^8.2 || ^8.3 || ^8.4`. Internal implementations avoid PHP 8.2+-only language syntax to maintain runtime compatibility for Laravel 9 applications running on PHP 8.0/8.1, while fully supporting PHP 8.3/8.4 runtimes required by Laravel 13.
+> **PHP Support & Testing Note**: Package declared PHP constraint is `^8.0 || ^8.1 || ^8.2 || ^8.3 || ^8.4`. Automated test suites were executed and verified across Laravel 9, 10, 11, 12, and 13 on PHP 8.3. Internal implementations avoid PHP 8.2+-only language syntax to maintain runtime compatibility for Laravel 9 applications running on PHP 8.0/8.1, while supporting modern PHP 8.3/8.4 runtimes required by Laravel 13. (Direct execution under PHP 8.4 requires an environment with the PHP 8.4 binary).
 
 ## Current Development Status
 
