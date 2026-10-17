@@ -61,7 +61,7 @@ On shared hosting with cPanel or Plesk, add a Cron Job in the control panel targ
 If your host application prefers explicitly declaring scheduled commands in its own scheduler (e.g. `routes/console.php` in Laravel 11 or `app/Console/Kernel.php` in Laravel 9), disable package auto-scheduling:
 
 ```env
-TIGERPOS_BACKUP_SCHEDULE_ENABLED=false
+POS_BACKUP_SCHEDULE_ENABLED=false
 ```
 
 And manually register the command in your host scheduler:
@@ -157,11 +157,11 @@ php artisan tigerpos:prune-backups --execute --local-only
 For operational security, automated pruning is **disabled by default**. To have Laravel's Console Scheduler automatically execute `tigerpos:prune-backups --execute` on a schedule, set:
 
 ```env
-TIGERPOS_BACKUP_PRUNE_ENABLED=true
-TIGERPOS_BACKUP_PRUNE_CRON="30 2 * * *"
+POS_BACKUP_PRUNE_ENABLED=true
+POS_BACKUP_PRUNE_CRON="30 2 * * *"
 ```
 
-> **Note**: Automated backup creation (`TIGERPOS_BACKUP_SCHEDULE_ENABLED`) and automated pruning (`TIGERPOS_BACKUP_PRUNE_ENABLED`) operate completely independently.
+> **Note**: Automated backup creation (`POS_BACKUP_SCHEDULE_ENABLED`) and automated pruning (`POS_BACKUP_PRUNE_ENABLED`) operate completely independently.
 
 ## S3 Object Key Structure
 
@@ -201,11 +201,11 @@ For POS stations that only perform backups and uploads, grant standard read/writ
 > **IAM Action Notes**:
 > - `s3:HeadObject` is an API operation, but in AWS IAM policies it is authorized under the `s3:GetObject` permission.
 > - `s3:AbortMultipartUpload` allows the AWS SDK's `ObjectUploader` to clean up incomplete multipart upload parts if a network failure or error interrupts large uploads.
-> - If using AWS KMS for customer-managed server-side encryption (`TIGERPOS_BACKUP_AWS_KMS_KEY_ID`), the IAM entity also requires `kms:GenerateDataKey` and `kms:Decrypt` on the specific KMS key ARN.
+> - If using AWS KMS for customer-managed server-side encryption (`POS_BACKUP_AWS_KMS_KEY_ID`), the IAM entity also requires `kms:GenerateDataKey` and `kms:Decrypt` on the specific KMS key ARN.
 
 ### 2. Pruning Permissions (Destructive — Use with Care)
 
-If you enable remote pruning from the POS application via `tigerpos:prune-backups --execute` or `TIGERPOS_BACKUP_PRUNE_ENABLED=true`, the station's IAM role must also be granted `s3:ListBucket` and `s3:DeleteObject`, strictly scoped to the POS station's path:
+If you enable remote pruning from the POS application via `tigerpos:prune-backups --execute` or `POS_BACKUP_PRUNE_ENABLED=true`, the station's IAM role must also be granted `s3:ListBucket` and `s3:DeleteObject`, strictly scoped to the POS station's path:
 
 ```json
 {
@@ -297,8 +297,8 @@ Before deploying or enabling automated backups on production POS endpoints, exec
 1. **Configure Isolated Staging Scope**:
    Configure dedicated test values in `.env` to prevent any possibility of touching production data:
    ```env
-   TIGERPOS_BACKUP_POS_ID="smoke-test-pos"
-   TIGERPOS_BACKUP_S3_PREFIX="pos-backups-staging"
+   POS_BACKUP_POS_ID="smoke-test-pos"
+   POS_BACKUP_S3_PREFIX="pos-backups-staging"
    ```
 2. **Test Local Backup Isolation**:
    Execute a local-only backup targeting a disposable test database:
@@ -322,17 +322,21 @@ Before deploying or enabling automated backups on production POS endpoints, exec
    Confirm in AWS S3 console that all test objects are confined to `{prefix}/smoke-test-pos/database/` and that production prefixes remain untouched.
 
 
-| Environment Variable | Description | Default |
+## Environment Variable Reference
+
+The package uses `POS_BACKUP_` as its environment variable prefix. Empty optional variables (e.g. `POS_BACKUP_AWS_KMS_KEY_ID=` or `POS_BACKUP_TEMP_DIR=`) safely preserve default fallbacks without overriding them.
+
+| Variable | Description | Default Fallback |
 |---|---|---|
-| `TIGERPOS_BACKUP_ENABLED` | Toggle backup execution | `true` |
-| `TIGERPOS_BACKUP_POS_ID` | Identifier for the POS station | `APP_NAME` / `pos-default` |
-| `TIGERPOS_BACKUP_AWS_REGION` | AWS S3 region | `us-east-1` |
-| `TIGERPOS_BACKUP_AWS_BUCKET` | Target AWS S3 bucket name | `""` |
-| `TIGERPOS_BACKUP_S3_PREFIX` | S3 folder key prefix | `pos-backups` |
-| `TIGERPOS_BACKUP_AWS_KMS_KEY_ID` | Optional KMS Key ID / ARN for SSE-KMS | `null` (uses SSE-S3 `AES256`) |
-| `TIGERPOS_BACKUP_SCHEDULE_ENABLED` | Toggle automated six-hour scheduling | `true` |
-| `TIGERPOS_BACKUP_SCHEDULE_CRON` | Cron expression for automated backup | `0 */6 * * *` |
-| `TIGERPOS_BACKUP_PRUNE_ENABLED` | Toggle automated retention pruning | `false` |
-| `TIGERPOS_BACKUP_PRUNE_CRON` | Cron expression for automated pruning | `30 2 * * *` |
-| `TIGERPOS_BACKUP_RETENTION_DAYS` | Backup retention window in days | `30` |
-| `TIGERPOS_BACKUP_TEMP_DIR` | Local temporary directory for dumps | `storage_path('app/backup-temp')` |
+| `POS_BACKUP_ENABLED` | Toggle automated and manual backup execution | `true` |
+| `POS_BACKUP_POS_ID` | Identifier for the POS station | `APP_NAME` / `'pos-default'` |
+| `POS_BACKUP_AWS_REGION` | AWS S3 region | `AWS_DEFAULT_REGION` / `AWS_REGION` / `'us-east-1'` |
+| `POS_BACKUP_AWS_BUCKET` | Target AWS S3 bucket name | `AWS_BUCKET` / `""` |
+| `POS_BACKUP_S3_PREFIX` | S3 folder key prefix | `'pos-backups'` |
+| `POS_BACKUP_AWS_KMS_KEY_ID` | Optional KMS Key ID / ARN for SSE-KMS | `null` (uses SSE-S3 `AES256`) |
+| `POS_BACKUP_RETENTION_DAYS` | Backup retention window in days | `30` |
+| `POS_BACKUP_TEMP_DIR` | Local temporary directory for dumps | `storage_path('app/backup-temp')` |
+| `POS_BACKUP_SCHEDULE_ENABLED` | Toggle automated six-hour scheduling | `true` |
+| `POS_BACKUP_SCHEDULE_CRON` | Cron expression for automated backup | `'0 */6 * * *'` |
+| `POS_BACKUP_PRUNE_ENABLED` | Toggle automated retention pruning | `false` |
+| `POS_BACKUP_PRUNE_CRON` | Cron expression for automated pruning | `'30 2 * * *'` |
