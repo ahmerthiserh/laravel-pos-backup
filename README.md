@@ -7,7 +7,7 @@ A private Laravel package designed for multi-instance POS applications to perfor
 Provides a lightweight, reliable, and configurable backup solution supporting:
 - Multi-branch POS environments (unique `pos_id` tagging)
 - Shared hosting constraints
-- Laravel 9 and Laravel 11 compatibility
+- Laravel 9 through Laravel 13 compatibility
 - Direct upload to secure AWS S3 storage with retention policy management
 
 ## Compatibility Matrix
@@ -19,8 +19,10 @@ The package is designed to support the POS fleet running across both older and c
 | **Laravel 9** | `^9.0` | PHP `^8.0 \|\| ^8.1 \|\| ^8.2` |
 | **Laravel 10** | `^10.0` | PHP `^8.1 \|\| ^8.2 \|\| ^8.3` |
 | **Laravel 11** | `^11.0` | PHP `^8.2 \|\| ^8.3` |
+| **Laravel 12** | `^12.0` | PHP `^8.2 \|\| ^8.3 \|\| ^8.4` |
+| **Laravel 13** | `^13.0` | PHP `^8.3 \|\| ^8.4` |
 
-> Package PHP requirement: `^8.0 || ^8.1 || ^8.2 || ^8.3`. Internal implementations avoid PHP 8.2+-only language syntax to maintain runtime compatibility for Laravel 9 applications running on PHP 8.0/8.1.
+> Package PHP requirement: `^8.0 || ^8.1 || ^8.2 || ^8.3 || ^8.4`. Internal implementations avoid PHP 8.2+-only language syntax to maintain runtime compatibility for Laravel 9 applications running on PHP 8.0/8.1, while fully supporting PHP 8.3/8.4 runtimes required by Laravel 13.
 
 ## Current Development Status
 
@@ -65,7 +67,7 @@ TIGERPOS_BACKUP_SCHEDULE_ENABLED=false
 And manually register the command in your host scheduler:
 
 ```php
-// In app/Console/Kernel.php (Laravel 9/10) or routes/console.php (Laravel 11)
+// In app/Console/Kernel.php (Laravel 9/10) or routes/console.php (Laravel 11/12/13)
 use Illuminate\Support\Facades\Schedule;
 
 Schedule::command('tigerpos:backup')->cron('0 */6 * * *');
@@ -272,10 +274,10 @@ To install the package into a host POS application from the private Git reposito
 ]
 ```
 
-Then install the package via Composer:
+Then install the package via Composer (use `^1.1` for Laravel 12 and 13 support):
 
 ```bash
-composer require tiger/laravel-pos-backup
+composer require tiger/laravel-pos-backup:^1.1
 ```
 
 ## Configuration Publishing
